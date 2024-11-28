@@ -18,16 +18,47 @@ class DatapathIO(xlen: Int) extends Bundle {
   val ctrl = Flipped(new ControlSignals)
 }
 
-class FetchExecutePipelineRegister(xlen: Int) extends Bundle {
+class FetchDecodePipelineRegister(xlen: Int) extends Bundle {
   val inst = chiselTypeOf(Instructions.NOP)
   val pc = UInt(xlen.W)
 }
 
-class ExecuteWritebackPipelineRegister(xlen: Int) extends Bundle {
+class DecodeExecutePipelineRegister(xlen: Int) extends Bundle {
+  val inst = chiselTypeOf(Instructions.NOP)
+  val pc = UInt(xlen.W)
+  val alu_a = UInt(xlen.W)
+  val alu_b = UInt(xlen.W)
+  val alu_op := io.ctrl.alu_op.cloneType
+  val csr_in = UInt(xlen.W)
+  val st_type = io.ctrl.st_type.cloneType
+  val csr_cmd = io.ctrl.csr_cmd.cloneType
+  val illegal = Bool()
+  val pc_check = Bool()
+  val ld_type = io.ctrl.ld_type.cloneType
+  val wb_sel = io.ctrl.wb_sel.cloneType
+  val wb_en = Bool()
+}
+
+class ExecuteMemoryPipelineRegister(xlen: Int) extends Bundle {
   val inst = chiselTypeOf(Instructions.NOP)
   val pc = UInt(xlen.W)
   val alu = UInt(xlen.W)
   val csr_in = UInt(xlen.W)
+  val st_type = io.ctrl.st_type.cloneType
+  val csr_cmd = io.ctrl.csr_cmd.cloneType
+  val illegal = Bool()
+  val pc_check = Bool()
+  val ld_type = io.ctrl.ld_type.cloneType
+  val wb_sel = io.ctrl.wb_sel.cloneType
+  val wb_en = Bool()
+}
+
+class MemoryWritebackPipelineRegister(xlen: Int) extends Bundle {
+  val inst = chiselTypeOf(Instructions.NOP)
+  val pc = UInt(xlen.W)
+  val ld_type = io.ctrl.ld_type.cloneType
+  val wb_sel = io.ctrl.wb_sel.cloneType
+  val wb_en = Bool()
 }
 
 class Datapath(val conf: CoreConfig) extends Module {
@@ -42,35 +73,67 @@ class Datapath(val conf: CoreConfig) extends Module {
 
   /** Pipeline State Registers * */
 
-  /** *** Fetch / Execute Registers ****
+  /** *** Fetch / Decode Registers ****
     */
-  val fe_reg = RegInit(
-    (new FetchExecutePipelineRegister(conf.xlen)).Lit(
+  val fd_reg = RegInit(
+    (new FetchDecodePipelineRegister(conf.xlen)).Lit(
       _.inst -> Instructions.NOP,
       _.pc -> 0.U
     )
   )
 
-  /** *** Execute / Write Back Registers ****
+  /** *** Decode / Execute Registers ****
     */
-  val ew_reg = RegInit(
-    (new ExecuteWritebackPipelineRegister(conf.xlen)).Lit(
+  val de_reg = RegInit(
+    (new DecodeExecutePipelineRegister(conf.xlen)).Lit(
+      _.inst -> Instructions.NOP,
+      _.pc -> 0.U
+      _.alu_a -> 0.U
+      _.alu_b -> 0.U
+      _.alu_op -> 0.U
+      _.csr_in -> 0.U
+      _.st_type -> 0.U
+      _.csr_cmd -> 0.U
+      _.illegal -> false.Bool
+      _.pc_check -> false.Bool
+      _.ld_type -> 0.U
+      _.wb_sel -> 0.U
+      _.wb_en -> false.Bool
+    )
+  )
+
+  /** *** Execute / Memory Registers ****
+    */
+  val em_reg = RegInit(
+    (new ExecuteMemoryPipelineRegister(conf.xlen)).Lit(
       _.inst -> Instructions.NOP,
       _.pc -> 0.U,
       _.alu -> 0.U,
       _.csr_in -> 0.U
+      _.st_type -> 0.U
+      _.csr_cmd -> 0.U
+      _.illegal -> false.Bool
+      _.pc_check -> false.Bool
+      _.ld_type -> 0.U
+      _.wb_sel -> 0.U
+      _.wb_en -> false.Bool
     )
   )
 
-  /** **** Control signals ****
-    */
-  val st_type = Reg(io.ctrl.st_type.cloneType)
-  val ld_type = Reg(io.ctrl.ld_type.cloneType)
-  val wb_sel = Reg(io.ctrl.wb_sel.cloneType)
-  val wb_en = Reg(Bool())
-  val csr_cmd = Reg(io.ctrl.csr_cmd.cloneType)
-  val illegal = Reg(Bool())
-  val pc_check = Reg(Bool())
+  /** *** Memory / Writeback Registers ****
+    */  
+  val mw_reg = RegInit(
+    (new MemoryWritebackPipelineRegister(conf.xlen)).Lit(
+      _.inst -> Instructions.NOP,
+      _.pc -> 0.U,
+      _.ld_type -> 0.U
+      _.alu -> 0.U
+      _.load -> 0.U
+      _.wb_sel -> 0.U
+      _.wb_en -> false.Bool
+    )
+  )
+
 
   /** **** Fetch ****
     */
@@ -97,80 +160,118 @@ class Datapath(val conf: CoreConfig) extends Module {
   io.icache.req.valid := !stall
   io.icache.abort := false.B
 
-  // Pipelining
+  // Pipelining Fe/De
   when(!stall) {
-    fe_reg.pc := pc
-    fe_reg.inst := inst
+    fd_reg.pc := pc
+    fd_reg.inst := inst
   }
 
-  /** **** Execute ****
+
+  /** **** Decode ****
     */
-  io.ctrl.inst := fe_reg.inst
+  val alu_a = 
+  io.ctrl.inst := fd_reg.inst
 
   // regFile read
-  val rd_addr = fe_reg.inst(11, 7)
-  val rs1_addr = fe_reg.inst(19, 15)
-  val rs2_addr = fe_reg.inst(24, 20)
+  val rd_addr = fd_reg.inst(11, 7)
+  val rs1_addr = fd_reg.inst(19, 15)
+  val rs2_addr = fd_reg.inst(24, 20)
   regFile.io.raddr1 := rs1_addr
   regFile.io.raddr2 := rs2_addr
 
   // gen immdeates
-  immGen.io.inst := fe_reg.inst
+  immGen.io.inst := fd_reg.inst
   immGen.io.sel := io.ctrl.imm_sel
 
-  // bypass
-  val wb_rd_addr = ew_reg.inst(11, 7)
+  // bypass(need fix)
+  val wb_rd_addr = em_reg.inst(11, 7)
   val rs1hazard = wb_en && rs1_addr.orR && (rs1_addr === wb_rd_addr)
   val rs2hazard = wb_en && rs2_addr.orR && (rs2_addr === wb_rd_addr)
   val rs1 = Mux(wb_sel === WB_ALU && rs1hazard, ew_reg.alu, regFile.io.rdata1)
   val rs2 = Mux(wb_sel === WB_ALU && rs2hazard, ew_reg.alu, regFile.io.rdata2)
-
-  // ALU operations
-  alu.io.A := Mux(io.ctrl.A_sel === A_RS1, rs1, fe_reg.pc)
-  alu.io.B := Mux(io.ctrl.B_sel === B_RS2, rs2, immGen.io.out)
-  alu.io.alu_op := io.ctrl.alu_op
 
   // Branch condition calc
   brCond.io.rs1 := rs1
   brCond.io.rs2 := rs2
   brCond.io.br_type := io.ctrl.br_type
 
-  // D$ access
-  val daddr = Mux(stall, ew_reg.alu, alu.io.sum) >> 2.U << 2.U
-  val woffset = (alu.io.sum(1) << 4.U).asUInt | (alu.io.sum(0) << 3.U).asUInt
-  io.dcache.req.valid := !stall && (io.ctrl.st_type.orR || io.ctrl.ld_type.orR)
-  io.dcache.req.bits.addr := daddr
-  io.dcache.req.bits.data := rs2 << woffset
-  io.dcache.req.bits.mask := MuxLookup(Mux(stall, st_type, io.ctrl.st_type), "b0000".U)(
-    Seq(ST_SW -> "b1111".U, ST_SH -> ("b11".U << alu.io.sum(1, 0)), ST_SB -> ("b1".U << alu.io.sum(1, 0)))
-  )
+  // ALU Operands
+  alu.io.A := Mux(io.ctrl.A_sel === A_RS1, rs1, fd_reg.pc)
+  alu.io.B := Mux(io.ctrl.B_sel === B_RS2, rs2, immGen.io.out)
 
-  // Pipelining
+  // Pipelining De/Ex
   when(reset.asBool || !stall && csr.io.expt) {
-    st_type := 0.U
-    ld_type := 0.U
-    wb_en := false.B
-    csr_cmd := 0.U
-    illegal := false.B
-    pc_check := false.B
+    de_reg.st_type := 0.U
+    de_reg.csr_cmd := 0.U
+    de_reg.illegal := false.B
+    de_reg.pc_check := false.B
+    de_reg.ld_type := 0.U
+    de_reg.wb_en := false.B
   }.elsewhen(!stall && !csr.io.expt) {
-    ew_reg.pc := fe_reg.pc
-    ew_reg.inst := fe_reg.inst
-    ew_reg.alu := alu.io.out
-    ew_reg.csr_in := Mux(io.ctrl.imm_sel === IMM_Z, immGen.io.out, rs1)
-    st_type := io.ctrl.st_type
-    ld_type := io.ctrl.ld_type
-    wb_sel := io.ctrl.wb_sel
-    wb_en := io.ctrl.wb_en
-    csr_cmd := io.ctrl.csr_cmd
-    illegal := io.ctrl.illegal
-    pc_check := io.ctrl.pc_sel === PC_ALU
+    de_reg.pc := fd_reg.pc
+    de_reg.inst := fd_reg.inst
+    de_reg.alu_a := Mux(io.ctrl.A_sel === A_RS1, rs1, fd_reg.pc)
+    de_reg.alu_b := Mux(io.ctrl.B_sel === B_RS2, rs2, immGen.io.out)
+    de_reg.csr_in := Mux(io.ctrl.imm_sel === IMM_Z, immGen.io.out, rs1)
+    de_reg.alu_op := io.ctrl.alu_op
+    de_reg.st_type := io.ctrl.st_type
+    de_reg.csr_cmd := io.ctrl.csr_cmd
+    de_reg.illegal := io.ctrl.illegal
+    de_reg.pc_check := io.ctrl.pc_sel === PC_ALU
+    de_reg.ld_type := io.ctrl.ld_type
+    de_reg.wb_sel := io.ctrl.wb_sel
+    de_reg.wb_en := io.ctrl.wb_en
   }
 
+
+  /** **** Execute ****
+    */
+  // ALU caculation
+  alu.io.A := de_reg.alu_a
+  alu.io.B := de_reg.alu_b
+  alu.io.alu_op := de_reg.alu_op
+
+  // Pipelining De/Ex
+  when(reset.asBool || !stall && csr.io.expt) {
+    em_reg.st_type := 0.U
+    em_reg.csr_cmd := 0.U
+    em_reg.illegal := false.B
+    em_reg.pc_check := false.B
+    em_reg.ld_type := 0.U
+    em_reg.wb_en := false.B
+  }.elsewhen(!stall && !csr.io.expt) {
+    em_reg.pc := de_reg.pc
+    em_reg.inst := de_reg.inst
+    em_reg.alu := alu.io.out
+    em_reg.csr_in := de_reg.csr_in
+    em_reg.st_type := de_reg.st_type
+    em_reg.csr_cmd := de_reg.csr_cmd
+    em_reg.illegal := de_reg.illegal
+    em_reg.pc_check := de_reg.pc_check
+    em_reg.ld_type := de_reg.ld_type
+    em_reg.wb_sel := de_reg.wb_sel
+    em_reg.wb_en := de_reg.wb_en
+  }
+  
+
+  /** **** Memory ****
+    */
+  // ALU caculation
+  // D$ access
+  val abort = RegInit(false.Bool)
+  val offset = (em_reg.alu(1) << 4.U).asUInt | (em_reg.alu(0) << 3.U).asUInt
+
+  val daddr = em_reg.alu >> 2.U << 2.U
+  io.dcache.req.valid := !stall && (em_reg.st_type.orR || em_reg.ld_type.orR)
+  io.dcache.req.bits.addr := daddr
+  io.dcache.req.bits.data := rs2 << offset
+  io.dcache.req.bits.mask := MuxLookup(em_reg.st_type, "b0000".U)(
+    Seq(ST_SW -> "b1111".U, ST_SH -> ("b11".U << em_reg.alu(1, 0)), ST_SB -> ("b1".U << em_reg.alu(1, 0)))
+  )
+
   // Load
-  val loffset = (ew_reg.alu(1) << 4.U).asUInt | (ew_reg.alu(0) << 3.U).asUInt
-  val lshift = io.dcache.resp.bits.data >> loffset
-  val load = MuxLookup(ld_type, io.dcache.resp.bits.data.zext)(
+  val lshift = io.dcache.resp.bits.data >> offset
+  val load = MuxLookup(em_reg.ld_type, io.dcache.resp.bits.data.zext)(
     Seq(
       LD_LH -> lshift(15, 0).asSInt,
       LD_LB -> lshift(7, 0).asSInt,
@@ -178,7 +279,7 @@ class Datapath(val conf: CoreConfig) extends Module {
       LD_LBU -> lshift(7, 0).zext
     )
   )
-
+  
   // CSR access
   csr.io.stall := stall
   csr.io.in := ew_reg.csr_in
@@ -192,18 +293,37 @@ class Datapath(val conf: CoreConfig) extends Module {
   csr.io.st_type := st_type
   io.host <> csr.io.host
 
+  // Abort store when there's an excpetion
+  abort := csr.io.expt
+  io.dcache.abort := abort
+
+
+  /** **** Writeback ****
+    */
+  // Pipelining
+  when(reset.asBool || !stall && csr.io.expt) {
+    mw_reg.ld_type := 0.U
+    mw_reg.wb_en := false.B
+  }.elsewhen(!stall && !csr.io.expt) {
+    mw_reg.pc := em_reg.pc
+    mw_reg.inst := em_reg.inst
+    mw_reg.alu := em_reg.alu
+    mw_reg.load := load
+    mw_reg.csr_out := csr.io.out
+    mw_reg.ld_type := em_reg.ld_type
+    mw_reg.wb_sel := em_reg.wb_sel
+    mw_reg.wb_en := em_reg.wb_en
+  }
+
   // Regfile Write
   val regWrite =
-    MuxLookup(wb_sel, ew_reg.alu.zext)(
-      Seq(WB_MEM -> load, WB_PC4 -> (ew_reg.pc + 4.U).zext, WB_CSR -> csr.io.out.zext)
+    MuxLookup(mw_reg.wb_sel, mw_reg.alu.zext)(
+      Seq(WB_MEM -> mw_reg.load, WB_PC4 -> (mw_reg.pc + 4.U).zext, WB_CSR -> mw_reg.csr_out.zext)
     ).asUInt
 
-  regFile.io.wen := wb_en && !stall && !csr.io.expt
+  regFile.io.wen := mw_reg.wb_en && !stall 
   regFile.io.waddr := wb_rd_addr
   regFile.io.wdata := regWrite
-
-  // Abort store when there's an excpetion
-  io.dcache.abort := csr.io.expt
 
   // TODO: re-enable through AOP
 //  if (p(Trace)) {

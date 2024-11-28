@@ -150,18 +150,24 @@ class Control extends Module {
   io.pc_sel := ctrlSignals(0)
   io.inst_kill := ctrlSignals(6).asBool
 
-  // Control signals for Execute
+  // Control signals for Decode
   io.A_sel := ctrlSignals(1)
   io.B_sel := ctrlSignals(2)
   io.imm_sel := ctrlSignals(3)
-  io.alu_op := ctrlSignals(4)
   io.br_type := ctrlSignals(5)
+
+  // Control signals for Execute
+  io.alu_op := ctrlSignals(4)
+  
+
+  // Control signals for Memory
   io.st_type := ctrlSignals(7)
+  io.csr_cmd := ctrlSignals(11)
+  io.illegal := ctrlSignals(12)
+  //pc_sel == 
 
   // Control signals for Write Back
   io.ld_type := ctrlSignals(8)
   io.wb_sel := ctrlSignals(9)
   io.wb_en := ctrlSignals(10).asBool
-  io.csr_cmd := ctrlSignals(11)
-  io.illegal := ctrlSignals(12)
 }
