@@ -37,6 +37,7 @@ class DecodeExecutePipelineRegister(xlen: Int) extends Bundle {
   val ld_type = UInt(3.W)
   val wb_sel = UInt(2.W)
   val wb_en = Bool()
+  val taken = Bool()
 }
 
 class ExecuteMemoryPipelineRegister(xlen: Int) extends Bundle {
@@ -56,11 +57,12 @@ class ExecuteMemoryPipelineRegister(xlen: Int) extends Bundle {
 class MemoryWritebackPipelineRegister(xlen: Int) extends Bundle {
   val inst = chiselTypeOf(Instructions.NOP)
   val pc = UInt(xlen.W)
-  val alu = UInt(xlen.W)
   val ld_type = UInt(3.W)
   val wb_sel = UInt(2.W)
   val wb_en = Bool()
-  val load = 
+  val alu = UInt(xlen.W)
+  val load = SInt(xlen.W)
+  val csr_out = UInt(xlen.W)
 }
 
 class Datapath(val conf: CoreConfig) extends Module {
@@ -89,18 +91,19 @@ class Datapath(val conf: CoreConfig) extends Module {
   val de_reg = RegInit(
     (new DecodeExecutePipelineRegister(conf.xlen)).Lit(
       _.inst -> Instructions.NOP,
-      _.pc -> 0.U
-      _.alu_a -> 0.U
-      _.alu_b -> 0.U
-      _.alu_op -> 0.U
-      _.csr_in -> 0.U
-      _.st_type -> 0.U
-      _.csr_cmd -> 0.U
-      _.illegal -> false.Bool
-      _.pc_check -> false.Bool
-      _.ld_type -> 0.U
-      _.wb_sel -> 0.U
-      _.wb_en -> false.Bool
+      _.pc -> 0.U,
+      _.alu_a -> 0.U,
+      _.alu_b -> 0.U,
+      _.alu_op -> 0.U,
+      _.csr_in -> 0.U,
+      _.st_type -> 0.U,
+      _.csr_cmd -> 0.U,
+      _.illegal -> false.B,
+      _.pc_check -> false.B,
+      _.ld_type -> 0.U,
+      _.wb_sel -> 0.U,
+      _.wb_en -> false.B,
+      _.taken -> false.B
     )
   )
 
@@ -111,14 +114,14 @@ class Datapath(val conf: CoreConfig) extends Module {
       _.inst -> Instructions.NOP,
       _.pc -> 0.U,
       _.alu -> 0.U,
-      _.csr_in -> 0.U
-      _.st_type -> 0.U
-      _.csr_cmd -> 0.U
-      _.illegal -> false.Bool
-      _.pc_check -> false.Bool
-      _.ld_type -> 0.U
-      _.wb_sel -> 0.U
-      _.wb_en -> false.Bool
+      _.csr_in -> 0.U,
+      _.st_type -> 0.U,
+      _.csr_cmd -> 0.U,
+      _.illegal -> false.B,
+      _.pc_check -> false.B,
+      _.ld_type -> 0.U,
+      _.wb_sel -> 0.U,
+      _.wb_en -> false.B
     )
   )
 
@@ -128,11 +131,12 @@ class Datapath(val conf: CoreConfig) extends Module {
     (new MemoryWritebackPipelineRegister(conf.xlen)).Lit(
       _.inst -> Instructions.NOP,
       _.pc -> 0.U,
-      _.ld_type -> 0.U
-      _.alu -> 0.U
-      _.load -> 0.U
-      _.wb_sel -> 0.U
-      _.wb_en -> false.Bool
+      _.ld_type -> 0.U,
+      _.alu -> 0.U,
+      _.load -> 0.S,
+      _.wb_sel -> 0.U,
+      _.wb_en -> false.B,
+      _.csr_out -> 0.U
     )
   )
 
@@ -149,12 +153,12 @@ class Datapath(val conf: CoreConfig) extends Module {
       stall -> pc,
       csr.io.expt -> csr.io.evec,
       (io.ctrl.pc_sel === PC_EPC) -> csr.io.epc,
-      ((io.ctrl.pc_sel === PC_ALU) || (brCond.io.taken)) -> (alu.io.sum >> 1.U << 1.U),
+      ((io.ctrl.pc_sel === PC_ALU) || (de_reg.taken)) -> (alu.io.sum >> 1.U << 1.U),
       (io.ctrl.pc_sel === PC_0) -> pc
     )
   )
   val inst =
-    Mux(started || io.ctrl.inst_kill || brCond.io.taken || csr.io.expt, Instructions.NOP, io.icache.resp.bits.data)
+    Mux(started || io.ctrl.inst_kill || de_reg.taken || brCond.io.taken || csr.io.expt, Instructions.NOP, io.icache.resp.bits.data)
   pc := next_pc
   io.icache.req.bits.addr := next_pc
   io.icache.req.bits.data := 0.U
@@ -163,7 +167,11 @@ class Datapath(val conf: CoreConfig) extends Module {
   io.icache.abort := false.B
 
   // Pipelining Fe/De
-  when(!stall) {
+  // fd_reg reset when branch prediction miss
+  when(de_reg.taken) {
+    fd_reg.pc := 0.U
+    fd_reg.inst := Instructions.NOP
+  }.elsewhen(!stall) { 
     fd_reg.pc := pc
     fd_reg.inst := inst
   }
@@ -186,19 +194,13 @@ class Datapath(val conf: CoreConfig) extends Module {
   immGen.io.sel := io.ctrl.imm_sel
 
   // bypass(need fix)
-  // RAW Hazard
-  // 1.The load instruction will delay one cycle, sloving by add a bypassing from Ex to De
-  // 2.bypassing from Me to De
-  // 3.bypassing from Wb to De
   val wb_rd_addr = em_reg.inst(11, 7)
   val rs1hazard = io.ctrl.wb_en && rs1_addr.orR && (rs1_addr === wb_rd_addr)
   val rs2hazard = io.ctrl.wb_en && rs2_addr.orR && (rs2_addr === wb_rd_addr)
   val rs1 = Mux(io.ctrl.wb_sel === WB_ALU && rs1hazard, em_reg.alu, regFile.io.rdata1)
   val rs2 = Mux(io.ctrl.wb_sel === WB_ALU && rs2hazard, em_reg.alu, regFile.io.rdata2)
 
-  // Branch condition calc(need fix)
-  // Control Hazard
-  // After
+  // Branch condition calc
   brCond.io.rs1 := rs1
   brCond.io.rs2 := rs2
   brCond.io.br_type := io.ctrl.br_type
@@ -229,6 +231,7 @@ class Datapath(val conf: CoreConfig) extends Module {
     de_reg.ld_type := io.ctrl.ld_type
     de_reg.wb_sel := io.ctrl.wb_sel
     de_reg.wb_en := io.ctrl.wb_en
+    de_reg.taken := brCond.io.taken
   }
 
 
@@ -239,7 +242,7 @@ class Datapath(val conf: CoreConfig) extends Module {
   alu.io.B := de_reg.alu_b
   alu.io.alu_op := de_reg.alu_op
 
-  // Pipelining De/Ex
+  // Pipelining Ex/Me
   when(reset.asBool || !stall && csr.io.expt) {
     em_reg.st_type := 0.U
     em_reg.csr_cmd := 0.U
@@ -266,7 +269,7 @@ class Datapath(val conf: CoreConfig) extends Module {
     */
   // ALU caculation
   // D$ access
-  val abort = RegInit(false.Bool)
+  val abort = RegInit(false.B)
   val offset = (em_reg.alu(1) << 4.U).asUInt | (em_reg.alu(0) << 3.U).asUInt
 
   val daddr = em_reg.alu >> 2.U << 2.U
@@ -291,7 +294,7 @@ class Datapath(val conf: CoreConfig) extends Module {
   // CSR access
   csr.io.stall := stall
   csr.io.in := em_reg.csr_in
-  csr.io.cmd := csr_cmd
+  csr.io.cmd := em_reg.csr_cmd
   csr.io.inst := em_reg.inst
   csr.io.pc := em_reg.pc
   csr.io.addr := em_reg.alu
