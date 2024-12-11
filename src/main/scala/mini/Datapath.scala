@@ -28,14 +28,14 @@ class DecodeExecutePipelineRegister(xlen: Int) extends Bundle {
   val pc = UInt(xlen.W)
   val alu_a = UInt(xlen.W)
   val alu_b = UInt(xlen.W)
-  val alu_op := io.ctrl.alu_op.cloneType
+  val alu_op = UInt(4.W)
   val csr_in = UInt(xlen.W)
-  val st_type = io.ctrl.st_type.cloneType
-  val csr_cmd = io.ctrl.csr_cmd.cloneType
+  val st_type = UInt(2.W)
+  val csr_cmd = UInt(3.W)
   val illegal = Bool()
   val pc_check = Bool()
-  val ld_type = io.ctrl.ld_type.cloneType
-  val wb_sel = io.ctrl.wb_sel.cloneType
+  val ld_type = UInt(3.W)
+  val wb_sel = UInt(2.W)
   val wb_en = Bool()
 }
 
@@ -44,21 +44,23 @@ class ExecuteMemoryPipelineRegister(xlen: Int) extends Bundle {
   val pc = UInt(xlen.W)
   val alu = UInt(xlen.W)
   val csr_in = UInt(xlen.W)
-  val st_type = io.ctrl.st_type.cloneType
-  val csr_cmd = io.ctrl.csr_cmd.cloneType
+  val st_type = UInt(2.W)
+  val csr_cmd = UInt(3.W)
   val illegal = Bool()
   val pc_check = Bool()
-  val ld_type = io.ctrl.ld_type.cloneType
-  val wb_sel = io.ctrl.wb_sel.cloneType
+  val ld_type = UInt(3.W)
+  val wb_sel = UInt(2.W)
   val wb_en = Bool()
 }
 
 class MemoryWritebackPipelineRegister(xlen: Int) extends Bundle {
   val inst = chiselTypeOf(Instructions.NOP)
   val pc = UInt(xlen.W)
-  val ld_type = io.ctrl.ld_type.cloneType
-  val wb_sel = io.ctrl.wb_sel.cloneType
+  val alu = UInt(xlen.W)
+  val ld_type = UInt(3.W)
+  val wb_sel = UInt(2.W)
   val wb_en = Bool()
+  val load = 
 }
 
 class Datapath(val conf: CoreConfig) extends Module {
@@ -184,13 +186,19 @@ class Datapath(val conf: CoreConfig) extends Module {
   immGen.io.sel := io.ctrl.imm_sel
 
   // bypass(need fix)
+  // RAW Hazard
+  // 1.The load instruction will delay one cycle, sloving by add a bypassing from Ex to De
+  // 2.bypassing from Me to De
+  // 3.bypassing from Wb to De
   val wb_rd_addr = em_reg.inst(11, 7)
-  val rs1hazard = wb_en && rs1_addr.orR && (rs1_addr === wb_rd_addr)
-  val rs2hazard = wb_en && rs2_addr.orR && (rs2_addr === wb_rd_addr)
-  val rs1 = Mux(wb_sel === WB_ALU && rs1hazard, ew_reg.alu, regFile.io.rdata1)
-  val rs2 = Mux(wb_sel === WB_ALU && rs2hazard, ew_reg.alu, regFile.io.rdata2)
+  val rs1hazard = io.ctrl.wb_en && rs1_addr.orR && (rs1_addr === wb_rd_addr)
+  val rs2hazard = io.ctrl.wb_en && rs2_addr.orR && (rs2_addr === wb_rd_addr)
+  val rs1 = Mux(io.ctrl.wb_sel === WB_ALU && rs1hazard, em_reg.alu, regFile.io.rdata1)
+  val rs2 = Mux(io.ctrl.wb_sel === WB_ALU && rs2hazard, em_reg.alu, regFile.io.rdata2)
 
-  // Branch condition calc
+  // Branch condition calc(need fix)
+  // Control Hazard
+  // After
   brCond.io.rs1 := rs1
   brCond.io.rs2 := rs2
   brCond.io.br_type := io.ctrl.br_type
@@ -282,15 +290,15 @@ class Datapath(val conf: CoreConfig) extends Module {
   
   // CSR access
   csr.io.stall := stall
-  csr.io.in := ew_reg.csr_in
+  csr.io.in := em_reg.csr_in
   csr.io.cmd := csr_cmd
-  csr.io.inst := ew_reg.inst
-  csr.io.pc := ew_reg.pc
-  csr.io.addr := ew_reg.alu
-  csr.io.illegal := illegal
-  csr.io.pc_check := pc_check
-  csr.io.ld_type := ld_type
-  csr.io.st_type := st_type
+  csr.io.inst := em_reg.inst
+  csr.io.pc := em_reg.pc
+  csr.io.addr := em_reg.alu
+  csr.io.illegal := em_reg.illegal
+  csr.io.pc_check := em_reg.pc_check
+  csr.io.ld_type := em_reg.ld_type
+  csr.io.st_type := em_reg.st_type
   io.host <> csr.io.host
 
   // Abort store when there's an excpetion
