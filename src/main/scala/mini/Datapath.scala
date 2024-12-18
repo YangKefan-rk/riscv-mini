@@ -39,6 +39,7 @@ class DecodeExecutePipelineRegister(xlen: Int) extends Bundle {
   val wb_en = Bool()
   val taken = Bool()
   val pc_sel = UInt(2.W)
+  val rs2 = UInt(xlen.W)
 }
 
 class ExecuteMemoryPipelineRegister(xlen: Int) extends Bundle {
@@ -106,7 +107,8 @@ class Datapath(val conf: CoreConfig) extends Module {
       _.wb_sel -> 0.U,
       _.wb_en -> false.B,
       _.taken -> false.B,
-      _.pc_sel -> 0.U   // has better way than just pipelining the pc_sel
+      _.pc_sel -> 0.U,   // has better way than just pipelining the pc_sel
+      _.rs2 -> 0.U
     )
   )
 
@@ -271,6 +273,7 @@ class Datapath(val conf: CoreConfig) extends Module {
     de_reg.wb_en := io.ctrl.wb_en
     de_reg.taken := brCond.io.taken
     de_reg.pc_sel := io.ctrl.pc_sel
+    de_reg.rs2 := rs2
   }
 
 
@@ -280,6 +283,16 @@ class Datapath(val conf: CoreConfig) extends Module {
   alu.io.A := de_reg.alu_a
   alu.io.B := de_reg.alu_b
   alu.io.alu_op := de_reg.alu_op
+
+  // D$ access
+  val woffset = (alu.io.sum(1) << 4.U).asUInt | (alu.io.sum(0) << 3.U).asUInt
+  val daddr = alu.io.sum >> 2.U << 2.U
+  io.dcache.req.valid := !stall && (de_reg.st_type.orR || de_reg.ld_type.orR)
+  io.dcache.req.bits.addr := daddr
+  io.dcache.req.bits.data := de_reg.rs2 << woffset
+  io.dcache.req.bits.mask := MuxLookup(de_reg.st_type, "b0000".U)(
+    Seq(ST_SW -> "b1111".U, ST_SH -> ("b11".U << alu.io.sum(1, 0)), ST_SB -> ("b1".U << alu.io.sum(1, 0)))
+  )
 
   // Pipelining Ex/Me
   when(reset.asBool || !stall && csr.io.expt) {
@@ -305,25 +318,29 @@ class Datapath(val conf: CoreConfig) extends Module {
     em_reg.pc_sel := de_reg.pc_sel
   }
   
-
   /** **** Memory ****
     */
-  // ALU caculation
-  // D$ access
-  val abort = RegInit(false.B)
-  val offset = (em_reg.alu(1) << 4.U).asUInt | (em_reg.alu(0) << 3.U).asUInt
-
-  val daddr = em_reg.alu >> 2.U << 2.U
-  io.dcache.req.valid := !stall && (em_reg.st_type.orR || em_reg.ld_type.orR)
-  io.dcache.req.bits.addr := daddr
-  io.dcache.req.bits.data := rs2 << offset
-  io.dcache.req.bits.mask := MuxLookup(em_reg.st_type, "b0000".U)(
-    Seq(ST_SW -> "b1111".U, ST_SH -> ("b11".U << em_reg.alu(1, 0)), ST_SB -> ("b1".U << em_reg.alu(1, 0)))
-  )
 
   // Load
-  val lshift = io.dcache.resp.bits.data >> offset
-  load := MuxLookup(em_reg.ld_type, io.dcache.resp.bits.data.zext)(
+  val loffset = (em_reg.alu(1) << 4.U).asUInt | (em_reg.alu(0) << 3.U).asUInt
+  val load_reg_valid = !io.icache.resp.valid && io.dcache.resp.valid && em_reg.ld_type =/=  LD_XXX
+  val load_state = RegInit(false.B)
+  switch(load_state) {
+    is(false.B){
+      when(load_reg_valid){
+        load_state := true.B
+      }
+    }
+    is(true.B){
+      when(!stall){
+        load_state := false.B
+      }
+    }
+  }
+  val load_reg = RegEnable(io.dcache.resp.bits.data, 0.U(conf.xlen.W), load_reg_valid && !load_state)
+  val load_data = Mux(load_state, load_reg, io.dcache.resp.bits.data)
+  val lshift = load_data >> loffset
+  load := MuxLookup(em_reg.ld_type, load_data.zext)(
     Seq(
       LD_LH -> lshift(15, 0).asSInt,
       LD_LB -> lshift(7, 0).asSInt,
@@ -346,8 +363,7 @@ class Datapath(val conf: CoreConfig) extends Module {
   io.host <> csr.io.host
 
   // Abort store when there's an excpetion
-  abort := csr.io.expt
-  io.dcache.abort := abort
+  io.dcache.abort := csr.io.expt
 
 
   /** **** Writeback ****
@@ -360,11 +376,11 @@ class Datapath(val conf: CoreConfig) extends Module {
     mw_reg.pc := em_reg.pc
     mw_reg.inst := em_reg.inst
     mw_reg.alu := em_reg.alu
-    mw_reg.load := load
     mw_reg.csr_out := csr.io.out
     mw_reg.ld_type := em_reg.ld_type
     mw_reg.wb_sel := em_reg.wb_sel
     mw_reg.wb_en := em_reg.wb_en
+    mw_reg.load := load
   }
 
   // Regfile Write
@@ -373,7 +389,7 @@ class Datapath(val conf: CoreConfig) extends Module {
       Seq(WB_MEM -> mw_reg.load, WB_PC4 -> (mw_reg.pc + 4.U).zext, WB_CSR -> mw_reg.csr_out.zext)
     ).asUInt
 
-  regFile.io.wen := mw_reg.wb_en && !stall 
+  regFile.io.wen := mw_reg.wb_en && !stall
   regFile.io.waddr := mw_rd_addr
   regFile.io.wdata := regWrite
 
